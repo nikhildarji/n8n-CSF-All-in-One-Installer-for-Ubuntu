@@ -1,65 +1,115 @@
 #!/bin/bash
 
-# --- INTERACTIVE INPUT ---
-echo "------------------------------------------------"
-echo "   n8n & CSF All-in-One Installer for Ubuntu"
-echo "------------------------------------------------"
+# --- 1. Setup Logging ---
+# This saves every command output to install.log for troubleshooting
+LOG_FILE="install.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
 
-# Prompt for Domain
-read -p "Enter your Domain (e.g., genzloot.com): " DOMAIN
-if [[ -z "$DOMAIN" ]]; then
-    echo "ERROR: Domain cannot be empty."
+echo "===================================================="
+echo "    n8n & CSF Optimized Installer (v2.1)"
+echo "    Log File: $(pwd)/$LOG_FILE"
+echo "===================================================="
+
+# --- 2. Interactive Prompts ---
+read -p "Enter your Domain (e.g., misoltechnologysolutions.com): " DOMAIN
+read -p "Enter your Email: " EMAIL
+
+if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
+    echo "ERROR: Domain and Email are required."
     exit 1
 fi
 
-# Prompt for Email
-read -p "Enter your Email (for SSL/CSF): " EMAIL
-if [[ -z "$EMAIL" ]]; then
-    echo "ERROR: Email cannot be empty."
-    exit 1
-fi
-
-TIMEZONE="Asia/Kolkata"
-
-# --- INSTALLATION START ---
-
-# 1. Update System & Install Dependencies
+# --- 3. Clean & Update ---
+echo "Cleaning old conflicts and updating system..."
 sudo apt update && sudo apt upgrade -y
-sudo apt install -y perl libwww-perl liblwp-protocol-https-perl ipset wget tar curl jq
+sudo apt remove -y certbot python3-certbot-nginx
+sudo snap remove certbot || true
 
-# 2. Install Docker & Docker Compose
-curl -fsSL https://get.docker.com -o get-docker.sh
-sudo sh get-docker.sh
-sudo apt install -y docker-compose-plugin
+# --- 4. Install Nginx & Dependencies ---
+echo "Installing Nginx and system tools..."
+sudo apt install -y nginx perl libwww-perl liblwp-protocol-https-perl ipset wget tar curl jq docker-compose-plugin
 
-# 3. Create n8n Directory and Docker Compose
+# --- 5. Deploy n8n with Speed Variables ---
 mkdir -p ~/n8n-docker && cd ~/n8n-docker
-
 cat <<EOF > docker-compose.yaml
 services:
   n8n:
     image: n8nio/n8n:latest
     restart: always
-    ports:
-      - "5678:5678"
     environment:
       - N8N_HOST=${DOMAIN}
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=https
       - WEBHOOK_URL=https://${DOMAIN}/
-      - N8N_SECURE_COOKIE=true
-      - NODE_ENV=production
+      - N8N_PROTOCOL=https
       - N8N_PUSH_BACKEND=sse
-      - GENERIC_TIMEZONE=${TIMEZONE}
-      - TZ=${TIMEZONE}
       - NODE_OPTIONS=--max-old-space-size=1024
-      - N8N_DIAGNOSTICS_ENABLED=false
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=72
+      - EXECUTIONS_DATA_SAVE_ON_SUCCESS=none
+      - GENERIC_TIMEZONE=Asia/Kolkata
     volumes:
       - n8n_data:/home/node/.n8n
-
 volumes:
   n8n_data:
 EOF
+sudo docker compose up -d
+
+# --- 6. Fix Certbot Snap Lock & Get SSL ---
+echo "Configuring Certbot..."
+sudo snap install --classic certbot
+sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+sudo snap set certbot trust-plugin-with-root=ok
+sudo snap connect certbot:nginx
+sudo certbot --nginx -d $DOMAIN -m $EMAIL --agree-tos --non-interactive
+
+# --- 7. Optimize Nginx for Speed ---
+echo "Applying Nginx performance tuning..."
+cat <<EOF > /etc/nginx/sites-available/n8n
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name $DOMAIN;
+
+    # SSL handled by Certbot automatically
+
+    location / {
+        proxy_pass http://localhost:5678;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # SPEED OPTIMIZATIONS
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+
+sudo ln -sf /etc/nginx/sites-available/n8n /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo systemctl restart nginx
+
+# --- 8. Install CSF Firewall ---
+echo "Hardening with CSF Firewall..."
+cd /usr/src
+sudo wget https://download.configserver.com/csf.tgz
+sudo tar -xzf csf.tgz
+cd csf
+sudo sh install.sh
+
+# CSF Speed & Docker Fixes
+sudo sed -i 's/TESTING = "1"/TESTING = "0"/g' /etc/csf/csf.conf
+sudo sed -i 's/TCP_IN = "/TCP_IN = "80,443,5678,22,/g' /etc/csf/csf.conf
+sudo sed -i 's/DOCKER = "
 
 # 4. Start n8n
 sudo docker compose up -d
